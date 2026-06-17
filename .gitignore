@@ -1,0 +1,11 @@
+# 编译产物
+server
+client
+*.o
+
+# 运行时数据文件
+account_*.txt
+account_id.txt
+
+# 编辑器
+.vscode/
