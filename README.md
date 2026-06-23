@@ -1,6 +1,6 @@
 # Linux 银行管理系统
 
-基于 Linux System V 消息队列实现的 C/S 架构银行管理系统。服务端采用多进程模型（`fork()`），通过两个消息队列与客户端通信，支持开户、存款、取款、转账四种业务，账户数据以独立文件持久化存储。
+基于 Linux TCP Socket + MySQL 实现的 C/S 架构银行管理系统。服务端采用多进程并发模型（`fork()`），通过 TCP 连接与客户端通信，支持开户、存款、取款、转账四种业务，账户数据以 MySQL 数据库持久化存储。
 
 ## 项目背景
 
@@ -8,48 +8,46 @@
 
 | 知识点 | 具体内容 |
 |--------|----------|
-| 进程编程 | `fork()` 创建子进程，父子进程关系，进程退出 |
-| System V 消息队列 | `msgget`、`msgsnd`、`msgrcv`，自定义消息结构体 |
-| Linux 文件 IO | `fopen`、`fscanf`、`fprintf` 持久化账户数据 |
-| Makefile 工程管理 | 多文件编译、目标依赖、清理规则 |
+| 进程编程 | `fork()` 创建子进程处理客户端连接，`signal(SIGCHLD)` 回收僵尸进程 |
+| TCP Socket 编程 | `socket`、`bind`、`listen`、`accept`、`send`、`recv`，客户端/服务端通信模型 |
+| MySQL C API | `mysql_init`、`mysql_real_connect`、`mysql_query`、`mysql_store_result` 数据库操作 |
+| Makefile 工程管理 | 多文件编译、外部库链接（`-lmysqlclient`）、目标依赖 |
 | C 语言基础 | 结构体封装、字符串处理、`switch` 分支逻辑 |
 
 ## 项目结构
 
 ```
 .
-├── bank.h          # 公共头文件：消息队列键值、操作类型宏、消息结构体
-├── server.c        # 服务端：主进程 fork 4 个子进程，各自处理一类业务
-├── client.c        # 客户端：循环菜单，收集用户输入，收发消息
+├── bank.h          # 公共头文件：通信端口、操作类型宏、消息结构体、MySQL 头文件
+├── server.c        # 服务端：主进程 accept 客户端连接，fork 子进程处理业务，MySQL 数据存储
+├── client.c        # 客户端：循环菜单，收集用户输入，通过 Socket 与服务器通信
+├── server1.c       # 备选服务端实现1
+├── server2.c       # 备选服务端实现2
 ├── Makefile        # 工程编译管理
 └── README.md       # 本文件
 ```
 
 ## 架构说明
 
-整个系统围绕两个 System V 消息队列运转：
+整个系统基于 TCP Socket + MySQL 客户端/服务端模型：
 
-- **请求队列** (key = `MSG_KEY_REQ` = 1234)：客户端将业务请求封装为 `MsgBuf` 结构体，通过 `msgsnd()` 发送到此队列。`mtype` 字段设置为操作类型（1-4），服务端各子进程按 `mtype` 分别阻塞读取。
-- **响应队列** (key = `MSG_KEY_RES` = 5678)：服务端处理完成后，将结果写入 `msg.result`，通过 `msgsnd()` 发回此队列。客户端用相同的 `mtype` 通过 `msgrcv()` 阻塞等待结果。
+- **服务端**：主进程创建 Socket 并绑定 `PORT`（8888），调用 `listen()` 后进入循环 `accept()`。每收到一个客户端连接，`fork()` 一个子进程处理该连接的所有业务。子进程连接 MySQL 数据库，循环 `recv()` 接收请求、处理、`send()` 返回结果，直至客户端断开。父进程通过 `signal(SIGCHLD, SIG_IGN)` 自动回收僵尸进程。
+- **客户端**：通过 `socket()` + `connect()` 连接服务器（默认 `127.0.0.1:8888`，支持命令行参数指定 IP），显示菜单 → 收集用户输入 → `send()` 发送 → `recv()` 接收结果 → 打印。选择"退出"后 `close()` 连接。
+- **MySQL 数据库**：使用 `bank` 数据库，`accounts` 表结构为 `(id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20), pwd VARCHAR(20), balance FLOAT)`。服务端子进程通过 `libmysqlclient` 执行 SQL 完成 CRUD 操作。
 
-服务端启动后，主进程调用 4 次 `fork()` 创建 4 个子进程，分别执行：
-
-| 子进程 | 执行函数 | mtype | 职责 |
-|--------|----------|-------|------|
-| 子进程 1 | `open_func()` | 1 (OPEN) | 开户：生成唯一账号，创建账户文件 |
-| 子进程 2 | `save_func()` | 2 (SAVE) | 存款：校验密码，余额增加，写回文件 |
-| 子进程 3 | `take_func()` | 3 (TAKE) | 取款：校验密码，余额扣减，写回文件 |
-| 子进程 4 | `trans_func()` | 4 (TRANS) | 转账：校验转出密码，双方余额更新 |
-
-每个子进程内部是一个 `while(1)` 死循环，阻塞在 `msgrcv()` 上等待对应类型的请求。主进程则进入无限循环保持存活（否则子进程会变孤儿）。
+| 操作 | opt 值 | 服务端处理逻辑 |
+|------|--------|---------------|
+| 开户 | 1 (OPEN) | `INSERT INTO accounts (name,pwd,balance) VALUES (...)`，`mysql_insert_id()` 返回账号 |
+| 存款 | 2 (SAVE) | `SELECT` 查询账户，校验密码，`UPDATE` 累加余额 |
+| 取款 | 3 (TAKE) | `SELECT` 查询账户，校验密码，`UPDATE` 扣减余额 |
+| 转账 | 4 (TRANS) | 分别 `SELECT` 转出和转入账户，校验密码，两次 `UPDATE` 更新双方余额 |
 
 ## 消息协议
 
-客户端与服务端之间传递的所有数据统一使用 `MsgBuf` 结构体，定义在 `bank.h` 中：
+客户端与服务端之间传递的所有数据统一使用 `MsgBuf` 结构体，定义在 `bank.h` 中，通过 TCP 直接发送和接收整个结构体：
 
 ```c
 typedef struct {
-    long mtype;          // 消息类型，必须放在结构体第一位（System V 要求）
     int opt;             // 操作类型：1-开户 2-存款 3-取款 4-转账
     char name[20];       // 账户持有人姓名
     char pwd[20];        // 账户密码
@@ -60,51 +58,34 @@ typedef struct {
 } MsgBuf;
 ```
 
-**各操作需要填写的字段：**
-
-| 操作 | opt | name | pwd | account | money | to_account |
-|------|-----|------|-----|---------|-------|------------|
-| 开户 | 1 | ✅ | ✅ | ❌ | ❌ | ❌ |
-| 存款 | 2 | ✅ | ✅ | ✅ | ✅ | ❌ |
-| 取款 | 3 | ✅ | ✅ | ✅ | ✅ | ❌ |
-| 转账 | 4 | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-发送时 `mtype` 必须设为对应的操作类型值，服务端各子进程按 `mtype` 过滤接收。
+> **注意**：与旧版消息队列实现不同，新版不再需要 `long mtype` 字段。结构体直接通过 `send()`/`recv()` 传输，无需区分消息类型。TCP 是点对点面向连接的全双工通信，服务端子进程与客户端一一对应，无需 `mtype` 来区分消息目标。
 
 ## 数据持久化
 
-### 账号计数器
+账户数据存储在 MySQL 数据库中，使用 `bank` 数据库。
 
-`account_id.txt` 记录当前已分配的最大账号 ID。开户流程：
+### 数据库环境准备
 
-1. 以只读模式打开 `account_id.txt`，读取当前值
-2. 将值 +1 作为新账号
-3. 以写模式重新打开文件，写入新值
-4. 新账号返回给客户端
+运行服务端前需创建数据库和表：
 
-首次运行（文件不存在）时，账号从 1 开始。
+```sql
+CREATE DATABASE IF NOT EXISTS bank;
+USE bank;
 
-### 账户文件
-
-每个账户以 `account_<id>.txt` 命名独立存储，格式为四行：
-
-```
-<账号ID>
-<姓名>
-<密码>
-<余额>
+CREATE TABLE IF NOT EXISTS accounts (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(20) NOT NULL,
+    pwd VARCHAR(20) NOT NULL,
+    balance FLOAT DEFAULT 0
+);
 ```
 
-例如 `account_1.txt`：
+### 存储特点
 
-```
-1
-张三
-123456
-1000.00
-```
-
-余额以浮点数存储（`%.2f`），支持小数金额。
+- 账号 (`id`) 使用 `AUTO_INCREMENT` 自增，由 MySQL 自动分配，无需手动管理计数器文件
+- 余额以 `FLOAT` 类型存储，支持小数金额
+- 所有 CRUD 操作通过 SQL 完成，天然支持并发安全
+- 相比旧版文件存储方案，无需手动管理 `account_id.txt` 和 `account_N.txt` 文件
 
 ## 编译与运行
 
@@ -112,7 +93,17 @@ typedef struct {
 
 - Linux 操作系统
 - GCC 编译器
-- System V 消息队列支持（内核需开启 `CONFIG_SYSVIPC`，主流发行版默认开启）
+- MySQL 服务端及客户端库（`libmysqlclient`）
+
+安装 MySQL 开发库：
+
+```bash
+# Ubuntu / Debian
+sudo apt install libmysqlclient-dev
+
+# CentOS / RHEL / Fedora
+sudo yum install mysql-devel
+```
 
 ### 编译
 
@@ -121,7 +112,13 @@ make          # 编译 server 和 client
 make clean    # 清理编译产物
 ```
 
-编译选项 `-Wall -Wextra -g` 开启所有常见警告，便于发现潜在问题。
+编译选项 `-Wall -Wextra -g` 开启所有常见警告，链接 `-lmysqlclient`。
+
+### 运行前准备
+
+1. 确保 MySQL 服务已启动
+2. 创建数据库和表（见上方「数据持久化」章节）
+3. 根据实际环境修改 `server.c` 中的 MySQL 连接参数（用户名、密码等）
 
 ### 运行
 
@@ -133,24 +130,21 @@ make clean    # 清理编译产物
 ./server &
 ```
 
-服务端启动后创建消息队列和 4 个子进程，每个子进程阻塞等待对应类型的请求。
+服务端启动后监听端口 `8888`，每个客户端连接会 fork 一个子进程独立处理。
 
 **终端 2 — 启动客户端：**
 
 ```bash
-./client
+./client              # 连接本地服务器（127.0.0.1:8888）
+./client 192.168.1.10 # 连接指定 IP 的服务器
 ```
 
 客户端显示菜单：
 
 ```
-========== 银行系统 ==========
-1. 开户
-2. 存钱
-3. 取钱
-4. 转账
-5. 退出
-请选择操作:
+=== 银行系统 ===
+1.开户 2.存钱 3.取钱 4.转账 5.退出
+请选择:
 ```
 
 ### 操作示例
@@ -158,96 +152,102 @@ make clean    # 清理编译产物
 **开户：**
 
 ```
-请选择操作: 1
-请输入姓名: 张三
-请设置密码: 123456
-请求已发送，等待服务器处理...
-服务器响应: 开户成功！账号为 1
+请选择: 1
+姓名: 张三
+密码: 123456
+结果: 开户成功！账号为 1
 ```
 
 **存钱：**
 
 ```
-请选择操作: 2
-请输入账号: 1
-请输入姓名: 张三
-请输入密码: 123456
-请输入存款金额: 1000
-请求已发送，等待服务器处理...
-服务器响应: 存款成功！存入 1000.00 元，当前余额 1000.00 元
+请选择: 2
+账号: 1
+姓名: 张三
+密码: 123456
+金额: 1000
+结果: 存款成功！存入 1000.00 元，当前余额 1000.00 元
 ```
 
 **取款：**
 
 ```
-请选择操作: 3
-请输入账号: 1
-请输入姓名: 张三
-请输入密码: 123456
-请输入取款金额: 500
-请求已发送，等待服务器处理...
-服务器响应: 取款成功，取出 500.00 元，当前余额 500.00 元
+请选择: 3
+账号: 1
+姓名: 张三
+密码: 123456
+金额: 500
+结果: 取款成功，取出 500.00 元，当前余额 500.00 元
 ```
 
 **转账：**
 
 ```
-请选择操作: 4
-请输入您的账号: 1
-请输入姓名: 张三
-请输入密码: 123456
-请输入转账金额: 200
-请输入目标账号: 2
-请求已发送，等待服务器处理...
-服务器响应: 转账成功，转账 200.00 元，当前余额 300.00 元
+请选择: 4
+账号: 1
+姓名: 张三
+密码: 123456
+金额: 200
+目标账号: 2
+结果: 转账成功，转账 200.00 元，当前余额 300.00 元
 ```
 
 ## 关键技术细节
 
-### 消息发送与接收
+### Socket 通信流程
+
+**服务端：**
 
 ```c
-// 发送消息到队列
-// 参数：队列ID, 消息指针, 消息体大小(不包括mtype), 是否阻塞
-msgsnd(req_id, &msg, sizeof(msg) - sizeof(long), 0);
+int server_fd = socket(AF_INET, SOCK_STREAM, 0);  // 创建 TCP socket
+bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));  // 绑定端口
+listen(server_fd, 5);                              // 开始监听
 
-// 接收消息（阻塞等待指定 mtype 的消息）
-// 参数：队列ID, 缓冲区指针, 消息体大小, 目标mtype, 标志
-msgrcv(req_id, &msg, sizeof(msg) - sizeof(long), SAVE, 0);
+while (1) {
+    int client_fd = accept(server_fd, ...);        // 接受客户端连接
+    if (fork() == 0) {
+        close(server_fd);                          // 子进程关闭监听 socket
+        // ... 连接 MySQL，循环 recv/send 处理业务 ...
+        close(client_fd);
+        _exit(0);
+    }
+    close(client_fd);                              // 父进程关闭客户端 socket
+}
 ```
 
-`sizeof(msg) - sizeof(long)` 表示只传输结构体中除 `mtype` 以外的字段，因为 `mtype` 是 System V 消息队列的内部字段，不参与数据传输。
+**客户端：**
 
-### 文件操作流程
+```c
+int sock_fd = socket(AF_INET, SOCK_STREAM, 0);     // 创建 socket
+connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr));  // 连接服务器
+send(sock_fd, &msg, sizeof(MsgBuf), 0);            // 发送请求
+recv(sock_fd, &msg, sizeof(MsgBuf), 0);            // 接收响应
+```
 
-每个业务处理都遵循相同的文件操作模式：
+### MySQL 操作流程
 
-1. `fopen(acc_file, "r")` — 以只读打开账户文件
-2. `fscanf(fp, "%d\n%s\n%s\n%f", ...)` — 按格式读取四行数据
-3. `fclose(fp)` — 关闭文件
-4. 根据业务修改 `balance`
-5. `fopen(acc_file, "w")` — 以写模式重新打开（清空原内容）
-6. `fprintf(fp, "%d\n%s\n%s\n%.2f\n", ...)` — 写回更新后的数据
-7. `fclose(fp)` — 关闭文件
+每个业务处理遵循相同的数据库操作模式：
+
+```c
+// 1. 构造 SQL
+sprintf(sql, "SELECT pwd,balance FROM accounts WHERE id=%d", msg.account);
+// 2. 执行查询
+mysql_query(conn, sql);
+// 3. 获取结果集
+MYSQL_RES *res = mysql_store_result(conn);
+// 4. 读取行数据
+MYSQL_ROW row = mysql_fetch_row(res);
+// 5. 处理数据（row[0] 为密码，row[1] 为余额）
+// 6. 释放结果集
+mysql_free_result(res);
+```
+
+对于写操作（INSERT / UPDATE），直接 `mysql_query()` 执行即可，无需获取结果集。
 
 ### 密码校验
 
-服务端从账户文件读取密码后，使用 `strcmp(msg.pwd, acc_pwd)` 对比客户端传入的密码。不匹配则直接返回 `"密码错误"` 并 `continue` 进入下一轮循环。
+服务端通过 SQL `SELECT` 查询密码后，使用 `strcmp(msg.pwd, row[0])` 对比客户端传入的密码。不匹配则直接返回 `"密码错误"` 并 `continue` 进入下一轮循环。
 
-## 清理消息队列
+### 僵尸进程处理
 
-程序退出后，消息队列可能残留在内核中，导致下次运行冲突。如需清理：
-
-```bash
-# 查看所有消息队列
-ipcs -q
-
-# 按 key 删除（key 1234 = 0x4d2，key 5678 = 0x162e）
-ipcrm -Q 0x000004d2
-ipcrm -Q 0x0000162e
-
-# 或者直接按 ID 删除
-ipcrm -q <msqid>
-```
-
-也可以在服务端中加入 `msgctl()` + `IPC_RMID` 实现程序退出时自动清理。
+服务端通过 `signal(SIGCHLD, SIG_IGN)` 忽略 `SIGCHLD` 信号，由内核自动回收终止的子进程，避免僵尸进程堆积。
