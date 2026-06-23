@@ -286,6 +286,9 @@ static GtkWidget *make_page_trans()
 /* ========== 主窗口 ========== */
 int main(int argc, char *argv[])
 {
+    char *ip = "127.0.0.1";
+    if (argc >= 2) ip = argv[1];
+
     gtk_init(&argc, &argv);
 
     /* 构建UI */
@@ -310,7 +313,7 @@ int main(int argc, char *argv[])
 
     entry_ip = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(entry_ip), "127.0.0.1");
-    gtk_entry_set_text(GTK_ENTRY(entry_ip), "127.0.0.1");
+    gtk_entry_set_text(GTK_ENTRY(entry_ip), ip);
     gtk_widget_set_size_request(entry_ip, 140, -1);
     gtk_box_pack_start(GTK_BOX(topbar), entry_ip, FALSE, FALSE, 0);
 
@@ -395,6 +398,10 @@ int main(int argc, char *argv[])
     gtk_stack_set_visible_child_name(GTK_STACK(stack), "open");
 
     gtk_widget_show_all(main_window);
+
+    /* 自动连接 */
+    on_connect(NULL, NULL);
+
     gtk_main();
 
     if (sock_fd >= 0) close(sock_fd);
