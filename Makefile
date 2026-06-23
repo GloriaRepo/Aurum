@@ -1,11 +1,12 @@
 CFLAGS = -Wall -Wextra -g
+LIBS = -lmysqlclient
 
 all: server client
 
-server: server.c
-	gcc $(CFLAGS) server.c -o server
+server: server.c bank.h
+	gcc $(CFLAGS) server.c -o server $(LIBS)
 
-client: client.c
+client: client.c bank.h
 	gcc $(CFLAGS) client.c -o client
 
 clean:

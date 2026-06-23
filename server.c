@@ -1,239 +1,137 @@
 #include "bank.h"
-void open_func();   // 开户
-void save_func();   // 存钱
-void take_func();   // 取钱
-void trans_func();  // 转账
-
 
 int main()
 {
-    // 1. 创建 2 个消息队列（不存在就创建）
-    msgget(MSG_KEY_REQ, 0666 | IPC_CREAT);
-    msgget(MSG_KEY_RES, 0666 | IPC_CREAT);
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    //AF_INET = 用 IPv4，SOCK_STREAM = 用 TCP。
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(PORT);
+    addr.sin_addr.s_addr = INADDR_ANY;
 
-    // 2. 创建子进程1 → 开户
-    if (fork() == 0)
-    {
-        open_func();
-        exit(0);
-    }
+    bind(server_fd, (struct sockaddr *)&addr, sizeof(addr));
+    listen(server_fd, 5);
+    printf("服务器启动成功，监听端口 %d\n", PORT);
 
-    // 3. 创建子进程2 → 存钱
-    if (fork() == 0)
-    {
-        save_func();
-        exit(0);
-    }
+    signal(SIGCHLD, SIG_IGN);
 
-    // 4. 创建子进程3 → 取钱
-    if (fork() == 0)
-    {
-        take_func();
-        exit(0);
-    }
-
-    // 5. 创建子进程4 → 转账
-    if (fork() == 0)
-    {
-        trans_func();
-        exit(0);
-    }
-
-    // 父进程死循环
-    while(1);
-    return 0;
-}
-void open_func()
-{
-
-   //1.拿到两个消息队列的ID
-   int req_id = msgget(MSG_KEY_REQ,0666);
-   int res_id = msgget(MSG_KEY_RES,0666);
-
-   //2.声明一个消息
-   MsgBuf msg;
-
-   //3.循环收消息
-   while(1){
-    //阻塞等待开户请求（mtype=1）
-    msgrcv(req_id, &msg, sizeof(msg) - sizeof(long), 1, 0);
-    //拷贝到server的msg里面，数据拷到本地 msg 的地址，拷贝的字节数为 sizeof(msg) - sizeof(long)
-    long who = msg.mtype;
-    //开户逻辑
-    /*account_id.txt记录了当前最大的账号ID
-    每次开户，读文件，加1,写回文件，用新ID
-    */
-    int new_id = 1;
-    
-    FILE *fp = fopen(ACCOUNT_FILE, "r");
-    //通过这个文件指针操作文件
-    if(fp != NULL){
-        fscanf(fp, "%d", &new_id);//读数据存到new_id中
-        fclose(fp);
-        new_id++;
-    }
-    fp = fopen(ACCOUNT_FILE, "w");
-    fprintf(fp, "%d", new_id);//把new_id的数据写到文件里面
-    fclose(fp);
-
-    //发送响应回客户端
-    msg.mtype = who;
-    msg.account = new_id;
-    sprintf(msg.result, "开户成功！账号为 %d", new_id);
-    msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
-
-   }
-
-}
-
-void save_func()
-{
-    //1.拿到两个消息队列的ID
-    int req_id = msgget(MSG_KEY_REQ, 0666);
-    int res_id = msgget(MSG_KEY_RES, 0666);
-
-    //2.声明一个消息
-    MsgBuf msg;
-
-    //3.循环收消息
     while (1) {
-        //阻塞等待存款请求（mtype=2）
-        msgrcv(req_id, &msg, sizeof(msg) - sizeof(long), SAVE, 0);
+        struct sockaddr_in client_addr;
+        socklen_t len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &len);
 
-        long who = msg.mtype;
+        if (fork() == 0) {
+            close(server_fd);
 
-        //存钱逻辑
-        //1.打开对应账户文件
-        char acc_file[32];
-        sprintf(acc_file, "account_%d.txt", msg.account);
-        // 把账号数字填入字符串模板。比如 msg.account = 1001，
-        // 执行后 acc_file 里就是 "account_1001.txt"
-        FILE *fp = fopen(acc_file, "r");
-        // 以只读模式（"r"）打开刚才拼好的账户文件，返回文件指针 fp
+            // 连接 MySQL
+            MYSQL *conn = mysql_init(NULL);
+            mysql_real_connect(conn, "localhost", "root", "Aurum@040718",
+                               "bank", 0, NULL, 0);
 
-        //2.读取账户信息
-        int acc_id;
-        char acc_name[20];
-        char acc_pwd[20];
-        float balance;
-        fscanf(fp, "%d\n%s\n%s\n%f", &acc_id, acc_name, acc_pwd, &balance);
-        //从文件中按格式读取数据，分别存入四个变量。
-        fclose(fp);
+            MsgBuf msg;
+            char sql[256];
 
-        //3.验证密码
-        if (strcmp(msg.pwd, acc_pwd) != 0) {
-            msg.mtype = who;
-            sprintf(msg.result, "密码错误");
-            msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
-            continue;
+            while (recv(client_fd, &msg, sizeof(MsgBuf), 0) > 0) {
+
+                if (msg.opt == OPEN) {
+                    sprintf(sql, "INSERT INTO accounts (name,pwd,balance) VALUES ('%s','%s',0)",
+                            msg.name, msg.pwd);
+                    mysql_query(conn, sql);
+                    msg.account = mysql_insert_id(conn);
+                    sprintf(msg.result, "开户成功！账号为 %d", msg.account);
+                }
+                else if (msg.opt == SAVE) {
+                    sprintf(sql, "SELECT pwd,balance FROM accounts WHERE id=%d", msg.account);
+                    mysql_query(conn, sql);
+                    MYSQL_RES *res = mysql_store_result(conn);
+                    MYSQL_ROW row = mysql_fetch_row(res);
+
+                    if (!row) {
+                        sprintf(msg.result, "账户不存在");
+                    } else if (strcmp(msg.pwd, row[0]) != 0) {
+                        sprintf(msg.result, "密码错误");
+                    } else {
+                        float bal = atof(row[1]) + msg.money;
+                        sprintf(sql, "UPDATE accounts SET balance=%.2f WHERE id=%d",
+                                bal, msg.account);
+                        mysql_query(conn, sql);
+                        sprintf(msg.result, "存款成功！存入 %.2f 元，当前余额 %.2f 元",
+                                msg.money, bal);
+                    }
+                    mysql_free_result(res);
+                }
+                else if (msg.opt == TAKE) {
+                    sprintf(sql, "SELECT pwd,balance FROM accounts WHERE id=%d", msg.account);
+                    mysql_query(conn, sql);
+                    MYSQL_RES *res = mysql_store_result(conn);
+                    MYSQL_ROW row = mysql_fetch_row(res);
+
+                    if (!row) {
+                        sprintf(msg.result, "账户不存在");
+                    } else if (strcmp(msg.pwd, row[0]) != 0) {
+                        sprintf(msg.result, "密码错误");
+                    } else {
+                        float bal = atof(row[1]) - msg.money;
+                        sprintf(sql, "UPDATE accounts SET balance=%.2f WHERE id=%d",
+                                bal, msg.account);
+                        mysql_query(conn, sql);
+                        sprintf(msg.result, "取款成功，取出 %.2f 元，当前余额 %.2f 元",
+                                msg.money, bal);
+                    }
+                    mysql_free_result(res);
+                }
+                else if (msg.opt == TRANS) {
+                    sprintf(sql, "SELECT pwd,balance FROM accounts WHERE id=%d", msg.account);
+                    mysql_query(conn, sql);
+                    MYSQL_RES *r1 = mysql_store_result(conn);
+                    MYSQL_ROW row1 = mysql_fetch_row(r1);
+
+                    if (!row1) {
+                        sprintf(msg.result, "转出账户不存在");
+                        send(client_fd, &msg, sizeof(MsgBuf), 0);
+                        mysql_free_result(r1);
+                        continue;
+                    }
+                    if (strcmp(msg.pwd, row1[0]) != 0) {
+                        sprintf(msg.result, "密码错误");
+                        send(client_fd, &msg, sizeof(MsgBuf), 0);
+                        mysql_free_result(r1);
+                        continue;
+                    }
+
+                    sprintf(sql, "SELECT balance FROM accounts WHERE id=%d", msg.to_account);
+                    mysql_query(conn, sql);
+                    MYSQL_RES *r2 = mysql_store_result(conn);
+                    MYSQL_ROW row2 = mysql_fetch_row(r2);
+
+                    if (!row2) {
+                        sprintf(msg.result, "转入账户不存在");
+                    } else {
+                        float b1 = atof(row1[1]) - msg.money;
+                        float b2 = atof(row2[0]) + msg.money;
+                        sprintf(sql, "UPDATE accounts SET balance=%.2f WHERE id=%d",
+                                b1, msg.account);
+                        mysql_query(conn, sql);
+                        sprintf(sql, "UPDATE accounts SET balance=%.2f WHERE id=%d",
+                                b2, msg.to_account);
+                        mysql_query(conn, sql);
+                        sprintf(msg.result, "转账成功，转账 %.2f 元，当前余额 %.2f 元",
+                                msg.money, b1);
+                    }
+                    mysql_free_result(r2);
+                    mysql_free_result(r1);
+                }
+
+                send(client_fd, &msg, sizeof(MsgBuf), 0);
+            }
+
+            mysql_close(conn);
+            close(client_fd);
+            _exit(0);
         }
 
-        //4.存钱：余额增加
-        balance += msg.money;
-
-        //5.写回账户文件
-        fp = fopen(acc_file, "w");
-        fprintf(fp, "%d\n%s\n%s\n%.2f\n", acc_id, acc_name, acc_pwd, balance);
-        fclose(fp);
-
-        //6.发送响应回客户端
-        msg.mtype = who;
-        sprintf(msg.result, "存款成功！存入 %.2f 元，当前余额 %.2f 元", msg.money, balance);
-        msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
+        close(client_fd);
     }
-}
 
-void take_func()
-{
-    int req_id = msgget(MSG_KEY_REQ,0666);
-    int res_id = msgget(MSG_KEY_RES,0666);
-
-    MsgBuf msg;
-    //内核拷贝到这里
-    while(1){
-        msgrcv(req_id,&msg,sizeof(msg) - sizeof(long),3,0);
-        long who = msg.mtype;
-        char acc_file[32];
-        sprintf(acc_file,"account_%d.txt",msg.account);
-        FILE *fp = fopen(acc_file,"r");
-        int acc_id;
-        char acc_name[20];
-        char acc_pwd[20];
-        float balance;
-        fscanf(fp, "%d\n%s\n%s\n%f", &acc_id, acc_name, acc_pwd, &balance);
-        //从文件中按格式读取数据，分别存入四个变量。
-        fclose(fp);
-
-        if (strcmp(msg.pwd, acc_pwd) != 0) {
-            msg.mtype = who;
-            sprintf(msg.result, "密码错误");
-            msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
-            continue;
-        }
-
-        balance -= msg.money;
-       
-        fp = fopen(acc_file, "w");
-        fprintf(fp, "%d\n%s\n%s\n%.2f\n", acc_id, acc_name, acc_pwd, balance);
-        fclose(fp);
-
-        sprintf(msg.result, "取款成功，取出 %.2f 元，当前余额 %.2f 元", msg.money, balance);
-        msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
-        
-    };
-}
-
-void trans_func()
-{
-    int req_id = msgget(MSG_KEY_REQ,0666);
-    int res_id = msgget(MSG_KEY_RES,0666);
-    MsgBuf msg;
-    while(1){
-        msgrcv(req_id,&msg,sizeof(msg) - sizeof(long),4,0);
-        long who = msg.mtype;
-        char acc_file_1[32];
-        sprintf(acc_file_1,"account_%d.txt",msg.account);
-        FILE *fp1 = fopen(acc_file_1,"r");
-        int acc_id_1;
-        char acc_name_1[20];
-        char acc_pwd_1[20];
-        float balance_1;
-        fscanf(fp1, "%d\n%s\n%s\n%f", &acc_id_1, acc_name_1, acc_pwd_1, &balance_1);
-        //从文件中按格式读取数据，分别存入四个变量。
-        fclose(fp1);
-
-        if (strcmp(msg.pwd, acc_pwd_1) != 0) {
-            msg.mtype = who;
-            sprintf(msg.result, "密码错误");
-            msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
-            continue;
-        }
-        
-        char acc_file_2[32];
-        sprintf(acc_file_2,"account_%d.txt",msg.to_account);
-        FILE *fp2 = fopen(acc_file_2,"r");
-        int acc_id_2;
-        char acc_name_2[20];
-        char acc_pwd_2[20];
-        float balance_2;
-        fscanf(fp2, "%d\n%s\n%s\n%f", &acc_id_2, acc_name_2, acc_pwd_2, &balance_2);
-        //从文件中按格式读取数据，分别存入四个变量。
-        fclose(fp2);
-        
-        balance_1 -= msg.money;
-        balance_2 += msg.money;
-
-        fp1 = fopen(acc_file_1, "w");
-        fprintf(fp1, "%d\n%s\n%s\n%.2f\n", acc_id_1, acc_name_1, acc_pwd_1, balance_1);
-        fclose(fp1);
-
-        fp2 = fopen(acc_file_2, "w");
-        fprintf(fp2, "%d\n%s\n%s\n%.2f\n", acc_id_2, acc_name_2, acc_pwd_2, balance_2);
-        fclose(fp2);
-
-        sprintf(msg.result, "转账成功，转账 %.2f 元，当前余额 %.2f 元", msg.money, balance_1);
-        msgsnd(res_id, &msg, sizeof(msg) - sizeof(long), 0);
-
-
-    }
+    return 0;
 }
