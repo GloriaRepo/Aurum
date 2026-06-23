@@ -11,7 +11,8 @@
 | 进程编程 | `fork()` 创建子进程处理客户端连接，`signal(SIGCHLD)` 回收僵尸进程 |
 | TCP Socket 编程 | `socket`、`bind`、`listen`、`accept`、`send`、`recv`，客户端/服务端通信模型 |
 | MySQL C API | `mysql_init`、`mysql_real_connect`、`mysql_query`、`mysql_store_result` 数据库操作 |
-| Makefile 工程管理 | 多文件编译、外部库链接（`-lmysqlclient`）、目标依赖 |
+| Makefile 工程管理 | 多文件编译、外部库链接（`-lmysqlclient`、`gtk+-3.0`）、目标依赖 |
+| GTK3 GUI 编程 | `GtkWindow`、`GtkStack`（页面切换）、`GtkEntry`、信号回调，C 语言图形界面 |
 | C 语言基础 | 结构体封装、字符串处理、`switch` 分支逻辑 |
 
 ## 项目结构
@@ -20,7 +21,8 @@
 .
 ├── bank.h          # 公共头文件：通信端口、操作类型宏、消息结构体、MySQL 头文件
 ├── server.c        # 服务端：主进程 accept 客户端连接，fork 子进程处理业务，MySQL 数据存储
-├── client.c        # 客户端：循环菜单，收集用户输入，通过 Socket 与服务器通信
+├── client.c        # 命令行客户端：循环菜单，收集用户输入，通过 Socket 与服务器通信
+├── client_gui.c    # GUI 客户端：GTK3 图形界面，侧边栏切换业务，通过 Socket 与服务器通信
 ├── server1.c       # 备选服务端实现1
 ├── server2.c       # 备选服务端实现2
 ├── Makefile        # 工程编译管理
@@ -94,25 +96,26 @@ CREATE TABLE IF NOT EXISTS accounts (
 - Linux 操作系统
 - GCC 编译器
 - MySQL 服务端及客户端库（`libmysqlclient`）
+- GTK3 开发库（`libgtk-3-dev`），仅编译 GUI 客户端时需要
 
-安装 MySQL 开发库：
+安装依赖：
 
 ```bash
 # Ubuntu / Debian
-sudo apt install libmysqlclient-dev
+sudo apt install libmysqlclient-dev libgtk-3-dev
 
 # CentOS / RHEL / Fedora
-sudo yum install mysql-devel
+sudo yum install mysql-devel gtk3-devel
 ```
 
 ### 编译
 
 ```bash
-make          # 编译 server 和 client
+make          # 编译 server、client 和 client_gui
 make clean    # 清理编译产物
 ```
 
-编译选项 `-Wall -Wextra -g` 开启所有常见警告，链接 `-lmysqlclient`。
+编译选项 `-Wall -Wextra -g` 开启所有常见警告，链接 `-lmysqlclient` 和 `gtk+-3.0`。
 
 ### 运行前准备
 
@@ -132,12 +135,20 @@ make clean    # 清理编译产物
 
 服务端启动后监听端口 `8888`，每个客户端连接会 fork 一个子进程独立处理。
 
-**终端 2 — 启动客户端：**
+**终端 2 — 启动命令行客户端：**
 
 ```bash
 ./client              # 连接本地服务器（127.0.0.1:8888）
 ./client 192.168.1.10 # 连接指定 IP 的服务器
 ```
+
+**终端 2（替代方案）— 启动 GUI 客户端：**
+
+```bash
+./client_gui              # 连接本地服务器（127.0.0.1:8888）
+```
+
+GUI 客户端启动后会弹出图形窗口，顶部输入服务器 IP 并点击「连接」，左侧边栏切换业务（开户/存款/取款/转账），底部显示操作结果。
 
 客户端显示菜单：
 
